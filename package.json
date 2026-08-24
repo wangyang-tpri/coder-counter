@@ -1,7 +1,7 @@
 {
-  "name": "code-counter",
+  "name": "coder-counter",
   "publisher": "wang-yang",
-  "displayName": "Code Counter",
+  "displayName": "Coder Counter",
   "description": "统计选中文件/文件夹代码行数，变更历史、图表可视化，编辑器行尾Git变更提示",
   "repository": {
     "type": "git",
