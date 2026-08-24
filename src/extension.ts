@@ -207,14 +207,22 @@ async function getFileCommitStats(repoRoot: string, fileUri: vscode.Uri): Promis
 }
 
 /**
- * 获取某文件的全部git提交记录（仅元数据，不计算行数，速度快）
+ * 获取某文件的git提交记录（仅元数据，不计算行数，速度快）
+ * 支持按分支、作者、日期范围筛选
  * @param repoRoot 仓库根目录
  * @param fileUri 文件Uri
+ * @param opts 筛选条件：all=所有分支，ref=指定分支名，author=作者关键词，since/until=日期范围
  * @returns 提交记录列表（新→旧）
  */
-async function getFileCommitList(repoRoot: string, fileUri: vscode.Uri): Promise<GitCommitStat[]> {
+async function getFileCommitList(repoRoot: string, fileUri: vscode.Uri, opts?: { all?: boolean; ref?: string; author?: string; since?: string; until?: string }): Promise<GitCommitStat[]> {
   const relativePath = getRepoRelativePath(repoRoot, fileUri);
-  const logOut = await runGitCmd(repoRoot, `git log --format=%H%x1e%an%x1e%ad%x1e%s --date=iso-strict -- "${relativePath}"`);
+  let ref = '';
+  if (opts?.all) ref = ' --all';
+  else if (opts?.ref) ref = ` ${opts.ref}`;
+  const author = opts?.author ? ` --author="${opts.author}"` : '';
+  const since = opts?.since ? ` --since="${opts.since}"` : '';
+  const until = opts?.until ? ` --until="${opts.until}"` : '';
+  const logOut = await runGitCmd(repoRoot, `git log --format=%H%x1e%an%x1e%ad%x1e%s --date=iso-strict${ref}${author}${since}${until} -- "${relativePath}"`);
   const result: GitCommitStat[] = [];
   if (logOut) {
     for (const line of logOut.split('\n').filter(Boolean)) {
@@ -245,6 +253,20 @@ async function getFileCommitList(repoRoot: string, fileUri: vscode.Uri): Promise
 async function getFilesInCommit(repoRoot: string, hash: string): Promise<string[]> {
   const out = await runGitCmd(repoRoot, `git show --name-only --format= ${hash}`);
   return out.split('\n').filter(Boolean);
+}
+
+/**
+ * 获取仓库所有本地分支名
+ * @param repoRoot 仓库根目录
+ * @returns 分支名列表
+ */
+async function getBranchList(repoRoot: string): Promise<string[]> {
+  try {
+    const out = await runGitCmd(repoRoot, 'git branch --format=%(refname:short)');
+    return out.split('\n').filter(Boolean);
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -509,8 +531,8 @@ tryLoad(0);
 `;
 }
 
-// 构建"文件提交历史"Webview页面：左侧提交列表，点击后在右侧显示该提交涉及的文件
-function buildCommitHistoryHtml(data: { filePath: string; commits: GitCommitStat[] }): string {
+// 构建"文件提交历史"Webview页面：顶部筛选栏（日期/分支/作者），左侧提交列表，点击提交后右侧显示涉及文件，点击文件直接打开该文件的提交差异
+function buildCommitHistoryHtml(data: { filePath: string; commits: GitCommitStat[]; branches: string[] }): string {
   // 转义 < 防止路径/摘要包含 </script> 破坏页面
   const dataJson = JSON.stringify(data).replace(/</g, '\\u003c');
   return `
@@ -526,6 +548,13 @@ body {margin:0;background:#1e1e1e;color:#ccc;font-family:system-ui;display:flex;
 .header {padding:10px 14px;border-bottom:1px solid #333;font-size:13px;display:flex;align-items:center;gap:10px}
 .header .path {color:#888;word-break:break-all;flex:1}
 .header .count {color:#4fc1ff;white-space:nowrap}
+.filterbar {padding:8px 14px;border-bottom:1px solid #333;display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px}
+.filterbar label {color:#9aa0a6}
+.filterbar input, .filterbar select {background:#252526;color:#ccc;border:1px solid #3c3c3c;padding:4px 6px;border-radius:3px;font-size:12px}
+.filterbar button {background:#0e639c;color:#fff;border:none;padding:4px 14px;border-radius:3px;cursor:pointer;font-size:12px}
+.filterbar button:hover {background:#1177bb}
+.filterbar button.secondary {background:#333;border:1px solid #3c3c3c}
+.filterbar button.secondary:hover {background:#3d3d3d}
 .main {flex:1;display:flex;min-height:0}
 .left {width:42%;border-right:1px solid #333;overflow-y:auto}
 .right {flex:1;overflow-y:auto;padding:10px 14px}
@@ -538,8 +567,9 @@ body {margin:0;background:#1e1e1e;color:#ccc;font-family:system-ui;display:flex;
 .commit-item .subject {margin-top:2px;font-size:13px;color:#ddd;word-break:break-all}
 .commit-item .author {color:#9aa0a6;font-size:11px;margin-top:2px}
 .placeholder {color:#888;text-align:center;margin-top:40px}
-.file-item {padding:6px 10px;border-bottom:1px solid #2a2a2a;font-family:Consolas,monospace;font-size:12px;word-break:break-all}
+.file-item {padding:6px 10px;border-bottom:1px solid #2a2a2a;font-family:Consolas,monospace;font-size:12px;word-break:break-all;cursor:pointer;display:flex;align-items:center;gap:6px}
 .file-item:hover {background:#2a2d2e}
+.file-item .icon {color:#4fc1ff;font-size:11px;flex-shrink:0}
 .section-title {color:#4fc1ff;margin:12px 0 6px;font-size:12px}
 </style>
 </head>
@@ -548,6 +578,18 @@ body {margin:0;background:#1e1e1e;color:#ccc;font-family:system-ui;display:flex;
   <span>📜 文件提交历史</span>
   <span class="path" id="filePathLabel"></span>
   <span class="count" id="countLabel"></span>
+</div>
+<div class="filterbar">
+  <label>日期</label>
+  <input type="date" id="fromInput" title="开始日期">
+  <span style="color:#888">至</span>
+  <input type="date" id="toInput" title="结束日期">
+  <label>分支</label>
+  <select id="branchSelect"></select>
+  <label>作者</label>
+  <input type="text" id="authorInput" placeholder="作者关键词" style="width:130px">
+  <button id="queryBtn">查询</button>
+  <button id="resetBtn" class="secondary">清空</button>
 </div>
 <div class="main">
   <div class="left" id="commitList"></div>
@@ -559,12 +601,55 @@ const vscode = acquireVsCodeApi();
 const commitList = document.getElementById('commitList');
 const fileList = document.getElementById('fileList');
 const countLabel = document.getElementById('countLabel');
+const fromInput = document.getElementById('fromInput');
+const toInput = document.getElementById('toInput');
+const branchSelect = document.getElementById('branchSelect');
+const authorInput = document.getElementById('authorInput');
+const queryBtn = document.getElementById('queryBtn');
+const resetBtn = document.getElementById('resetBtn');
 document.getElementById('filePathLabel').textContent = data.filePath;
-countLabel.textContent = data.commits.length > 0 ? \`共 \${data.commits.length} 条提交\` : '';
 let activeHash = '';
+
+function escapeHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function renderBranchSelect() {
+  let html = '<option value="__head__">当前分支</option>';
+  (data.branches || []).forEach(b => { html += '<option value="' + escapeHtml(b) + '">' + escapeHtml(b) + '</option>'; });
+  html += '<option value="__all__">所有分支</option>';
+  branchSelect.innerHTML = html;
+}
+
+function currentFilters() {
+  return {
+    all: branchSelect.value === '__all__',
+    ref: (branchSelect.value === '__all__' || branchSelect.value === '__head__') ? '' : branchSelect.value,
+    author: authorInput.value.trim(),
+    since: fromInput.value,
+    until: toInput.value
+  };
+}
+
+function runQuery() {
+  vscode.postMessage({ type: 'query', ...currentFilters() });
+}
+
+// 重置所有查询条件并重新查询
+function resetFilters() {
+  fromInput.value = '';
+  toInput.value = '';
+  authorInput.value = '';
+  branchSelect.value = '__head__';
+  runQuery();
+}
+
+function updateCount() {
+  countLabel.textContent = data.commits.length > 0 ? \`共 \${data.commits.length} 条提交\` : '共 0 条提交';
+}
+
 function renderCommits() {
   if (data.commits.length === 0) {
-    commitList.innerHTML = '<div class="placeholder">该文件暂无git提交记录</div>';
+    commitList.innerHTML = '<div class="placeholder">没有符合筛选条件的提交记录</div>';
+    fileList.innerHTML = '<div class="placeholder">点击左侧提交记录，查看该提交涉及的所有文件</div>';
     return;
   }
   commitList.innerHTML = data.commits.map(c => \`
@@ -583,17 +668,40 @@ function renderCommits() {
     });
   });
 }
+
+function renderFiles(files) {
+  if (!files || files.length === 0) {
+    fileList.innerHTML = '<div class="placeholder">该提交未涉及文件变更</div>';
+    return;
+  }
+  fileList.innerHTML = '<div class="section-title">涉及文件（' + files.length + '，点击文件打开该提交的差异）</div>' + files.map(f =>
+    '<div class="file-item" data-file="' + encodeURIComponent(f) + '"><span class="icon">🔀</span>' + escapeHtml(f) + '</div>').join('');
+  fileList.querySelectorAll('.file-item').forEach(el => {
+    el.addEventListener('click', () => {
+      vscode.postMessage({ type: 'openDiff', file: decodeURIComponent(el.dataset.file), hash: activeHash });
+    });
+  });
+}
+
 window.addEventListener('message', (event) => {
   const msg = event.data;
   if (msg.type === 'files' && msg.hash === activeHash) {
-    if (!msg.files || msg.files.length === 0) {
-      fileList.innerHTML = '<div class="placeholder">该提交未涉及文件变更</div>';
-      return;
-    }
-    fileList.innerHTML = '<div class="section-title">涉及文件（' + msg.files.length + '）</div>' + msg.files.map(f => '<div class="file-item">' + f + '</div>').join('');
+    renderFiles(msg.files);
+  } else if (msg.type === 'commits') {
+    data.commits = msg.commits || [];
+    activeHash = '';
+    updateCount();
+    renderCommits();
   }
 });
+
+renderBranchSelect();
+updateCount();
 renderCommits();
+queryBtn.addEventListener('click', runQuery);
+resetBtn.addEventListener('click', resetFilters);
+authorInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') runQuery(); });
+branchSelect.addEventListener('change', runQuery);
 </script>
 </body>
 </html>
@@ -785,6 +893,9 @@ export function activate(context: vscode.ExtensionContext) {
     }
   }, null, context.subscriptions);
 
+  // 扩展激活时（含启动激活），若已有活动编辑器，立即刷新一次行尾装饰，无需等光标移动
+  updateBlameDecoration(vscode.window.activeTextEditor);
+
   // ====================== 重构：打开git diff差异窗口命令（稳定版，使用自定义scheme） ======================
   // 注册自定义文本内容提供器，使vscode.diff能读取提交历史版本文件
   context.subscriptions.push(
@@ -855,9 +966,12 @@ export function activate(context: vscode.ExtensionContext) {
       vscode.window.showErrorMessage(`文件不在Git仓库中，无法获取提交历史：${fileUri.fsPath}`);
       return;
     }
-    const commits = await vscode.window.withProgress(
+    const [commits, branches] = await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: '正在读取提交历史...' },
-      () => getFileCommitList(repoRoot, fileUri)
+      () => Promise.all([
+        getFileCommitList(repoRoot, fileUri),
+        getBranchList(repoRoot)
+      ])
     );
     const panel = vscode.window.createWebviewPanel(
       'codeCounterCommitHistory',
@@ -865,7 +979,7 @@ export function activate(context: vscode.ExtensionContext) {
       vscode.ViewColumn.One,
       { enableScripts: true }
     );
-    panel.webview.html = buildCommitHistoryHtml({ filePath: fileUri.fsPath, commits });
+    panel.webview.html = buildCommitHistoryHtml({ filePath: fileUri.fsPath, commits, branches });
     panel.webview.onDidReceiveMessage(async (msg) => {
       if (msg.type === 'getFiles' && msg.hash) {
         let files: string[] = [];
@@ -875,6 +989,25 @@ export function activate(context: vscode.ExtensionContext) {
           files = [];
         }
         await panel.webview.postMessage({ type: 'files', hash: msg.hash, files });
+      } else if (msg.type === 'openDiff' && msg.file && msg.hash) {
+        // 点击右侧"涉及文件"：拼绝对路径后复用 openFileGitDiff 打开该文件的提交差异
+        const absPath = path.join(repoRoot, msg.file);
+        vscode.commands.executeCommand('code-counter.openFileGitDiff', { file: absPath, hash: msg.hash });
+      } else if (msg.type === 'query') {
+        // 按 日期/分支/作者 重新查询提交列表
+        let queryCommits: GitCommitStat[] = [];
+        try {
+          queryCommits = await getFileCommitList(repoRoot, fileUri, {
+            all: msg.all,
+            ref: msg.ref,
+            author: msg.author,
+            since: msg.since,
+            until: msg.until
+          });
+        } catch {
+          queryCommits = [];
+        }
+        await panel.webview.postMessage({ type: 'commits', commits: queryCommits });
       }
     }, null, context.subscriptions);
   });

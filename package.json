@@ -10,6 +10,7 @@
     "Other"
   ],
   "activationEvents": [
+    "onStartupFinished",
     "onCommand:code-counter.countCode",
     "onCommand:code-counter.clearHistory",
     "onCommand:code-counter.exportCsv",
