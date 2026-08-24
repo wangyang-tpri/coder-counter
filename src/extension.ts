@@ -826,8 +826,9 @@ export function activate(context: vscode.ExtensionContext) {
     const content = ` ${item.shortHash} ${item.author} · ${subject}`;
     const args = encodeURIComponent(JSON.stringify([{ file: fsPath, hash: item.fullHash }]));
     const historyArgs = encodeURIComponent(JSON.stringify([{ file: fsPath }]));
+    const chartArgs = encodeURIComponent(JSON.stringify([{ file: fsPath }]));
     const hover = new vscode.MarkdownString();
-    hover.appendMarkdown(`**提交** \`${item.fullHash}\`  \n\n**作者** ${item.author}  \n**摘要** ${item.subject}  \n\n[🔀](command:code-counter.openFileGitDiff?${args} "查看提交差异")  [📜](command:code-counter.openFileCommitHistory?${historyArgs} "查看文件提交历史")`);
+    hover.appendMarkdown(`**提交** \`${item.fullHash}\`  \n\n**作者** ${item.author}  \n**摘要** ${item.subject}  \n\n[🔀](command:code-counter.openFileGitDiff?${args} "查看提交差异")  [📜](command:code-counter.openFileCommitHistory?${historyArgs} "查看文件提交历史")  [📈](command:code-counter.openChart?${chartArgs} "代码量统计图表")`);
     hover.isTrusted = true;
     editor.setDecorations(blameLineDecoration, [{
       range: line.range,
@@ -1111,13 +1112,20 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.window.showInformationMessage(`✅CSV已导出: ${uri.fsPath}`);
   });
 
-  const openChartCmd = vscode.commands.registerCommand('code-counter.openChart', async () => {
-    const editor = vscode.window.activeTextEditor;
-    if (!editor || editor.document.isUntitled || editor.document.uri.scheme !== 'file') {
+  const openChartCmd = vscode.commands.registerCommand('code-counter.openChart', async (args?: { file?: string }) => {
+    let fileUri: vscode.Uri | undefined;
+    if (args && args.file) {
+      fileUri = vscode.Uri.file(args.file);
+    } else {
+      const editor = vscode.window.activeTextEditor;
+      if (editor && !editor.document.isUntitled && editor.document.uri.scheme === 'file') {
+        fileUri = editor.document.uri;
+      }
+    }
+    if (!fileUri) {
       vscode.window.showWarningMessage('请先在编辑器中打开一个文件，再执行“CodeCounter: 打开统计图表”。');
       return;
     }
-    const fileUri = editor.document.uri;
     const repoRoot = await getGitRepoRoot(fileUri);
     if (!repoRoot) {
       vscode.window.showErrorMessage(`文件不在Git仓库中，无法获取提交记录：${fileUri.fsPath}`);

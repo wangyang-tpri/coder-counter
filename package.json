@@ -1,7 +1,7 @@
 {
   "name": "code-counter",
   "displayName": "Code Counter",
-  "description": "统计选中文件/文件夹代码行数，变更历史、CSV导出、图表可视化，编辑器行尾Git变更提示",
+  "description": "统计选中文件/文件夹代码行数，变更历史、图表可视化，编辑器行尾Git变更提示",
   "version": "0.0.4",
   "engines": {
     "vscode": "^1.80.0"
@@ -12,11 +12,8 @@
   "activationEvents": [
     "onStartupFinished",
     "onCommand:code-counter.countCode",
-    "onCommand:code-counter.clearHistory",
-    "onCommand:code-counter.exportCsv",
     "onCommand:code-counter.openChart",
-    "onCommand:code-counter.openFileCommitHistory",
-    "onCommand:code-counter.openFileGitDiff"
+    "onCommand:code-counter.openFileCommitHistory"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -29,14 +26,6 @@
         }
       ],
       "commandPalette": [
-        {
-          "command": "code-counter.clearHistory",
-          "title": "CodeCounter: 清空统计历史记录"
-        },
-        {
-          "command": "code-counter.exportCsv",
-          "title": "CodeCounter: 导出历史为CSV文件"
-        },
         {
           "command": "code-counter.openChart",
           "title": "CodeCounter: 打开统计可视化图表"
