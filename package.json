@@ -1,0 +1,87 @@
+{
+  "name": "code-counter",
+  "displayName": "Code Counter",
+  "description": "统计选中文件/文件夹代码行数，变更历史、CSV导出、图表可视化，编辑器行尾Git变更提示",
+  "version": "0.0.4",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:code-counter.countCode",
+    "onCommand:code-counter.showHistory",
+    "onCommand:code-counter.clearHistory",
+    "onCommand:code-counter.exportCsv",
+    "onCommand:code-counter.openChart",
+    "onCommand:code-counter.openFileGitDiff"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "code-counter.countCode",
+          "group": "navigation",
+          "when": "resourceScheme == file"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "code-counter.showHistory",
+          "title": "CodeCounter: 查看代码统计变更历史"
+        },
+        {
+          "command": "code-counter.clearHistory",
+          "title": "CodeCounter: 清空统计历史记录"
+        },
+        {
+          "command": "code-counter.exportCsv",
+          "title": "CodeCounter: 导出历史为CSV文件"
+        },
+        {
+          "command": "code-counter.openChart",
+          "title": "CodeCounter: 打开统计可视化图表"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "code-counter.countCode",
+        "title": "统计代码行数"
+      },
+      {
+        "command": "code-counter.showHistory",
+        "title": "查看代码统计变更历史"
+      },
+      {
+        "command": "code-counter.clearHistory",
+        "title": "清空统计历史记录"
+      },
+      {
+        "command": "code-counter.exportCsv",
+        "title": "导出历史为CSV文件"
+      },
+      {
+        "command": "code-counter.openChart",
+        "title": "打开统计可视化图表"
+      },
+      {
+        "command": "code-counter.openFileGitDiff",
+        "title": "打开文件Git提交差异（内部）"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "16.x",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.1.3"
+  }
+}
