@@ -31,6 +31,18 @@ interface GitLineCommitInfo {
   fullHash: string;
 }
 
+// 文件的某次git提交记录及其对应行数统计
+interface GitCommitStat {
+  hash: string;
+  shortHash: string;
+  author: string;
+  dateLabel: string;
+  dateTs: number;
+  subject: string;
+  stats: CountResult;
+  isWorkingTree: boolean; // 是否为"当前工作区"合成记录
+}
+
 // ====================== 新增 Git 工具封装 开始 ======================
 const execAsync = promisify(exec);
 
@@ -111,6 +123,128 @@ async function getFileContentAtCommit(repoRoot: string, relativePath: string, ha
     maxBuffer: 100 * 1024 * 1024 // 100MB，防止大文件超出默认1MB缓冲
   });
   return stdout;
+}
+
+/**
+ * 计算文本的行数统计
+ */
+function computeStats(content: string): CountResult {
+  const { code, comment, blank } = parseContent(content);
+  const total = code + comment + blank;
+  return { fileCount: 1, totalLines: total, codeLines: code, commentLines: comment, blankLines: blank };
+}
+
+/**
+ * 格式化提交时间戳为可读字符串
+ */
+function formatCommitDate(ts: number): string {
+  const d = new Date(ts);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/**
+ * 获取某文件的git提交记录，并逐条计算文件在每次提交时的行数统计。
+ * 最后追加一条"当前工作区"合成记录，保证图表打开即有数据。
+ * @param repoRoot 仓库根目录
+ * @param fileUri 文件Uri
+ * @returns 按时间从旧到新排序的提交统计列表
+ */
+async function getFileCommitStats(repoRoot: string, fileUri: vscode.Uri): Promise<GitCommitStat[]> {
+  const relativePath = getRepoRelativePath(repoRoot, fileUri);
+
+  // 读取该文件的提交记录（新→旧），%x1e 作字段分隔符，避免摘要含逗号等干扰
+  const logOut = await runGitCmd(repoRoot, `git log --format=%H%x1e%an%x1e%ad%x1e%s --date=iso-strict -n 100 -- "${relativePath}"`);
+
+  const result: GitCommitStat[] = [];
+  if (logOut) {
+    const records = logOut.split('\n').filter(Boolean).map(line => {
+      const parts = line.split('\x1e');
+      const hash = parts[0];
+      const author = parts[1] || '';
+      const dateTs = new Date(parts[2]).getTime();
+      const subject = parts.slice(3).join('\x1e');
+      return { hash, author, dateTs, subject };
+    });
+    for (const r of records) {
+      try {
+        const content = await getFileContentAtCommit(repoRoot, relativePath, r.hash);
+        result.push({
+          hash: r.hash,
+          shortHash: r.hash.substring(0, 7),
+          author: r.author,
+          dateLabel: formatCommitDate(r.dateTs),
+          dateTs: r.dateTs,
+          subject: r.subject,
+          stats: computeStats(content),
+          isWorkingTree: false
+        });
+      } catch {
+        // 该提交读不到文件内容（如该提交恰好删除了文件），跳过
+      }
+    }
+  }
+
+  // 追加当前工作区状态（保证图表初始化即有数据）
+  try {
+    const current = await fs.promises.readFile(fileUri.fsPath, 'utf8');
+    result.push({
+      hash: '',
+      shortHash: '工作区',
+      author: '当前状态',
+      dateLabel: '当前工作区',
+      dateTs: Date.now(),
+      subject: '当前工作区文件状态',
+      stats: computeStats(current),
+      isWorkingTree: true
+    });
+  } catch {
+    // 文件读取失败（如已删除），忽略
+  }
+
+  // 提交记录 git log 返回新→旧，翻转成旧→新作为x轴趋势
+  return result.sort((a, b) => a.dateTs - b.dateTs);
+}
+
+/**
+ * 获取某文件的全部git提交记录（仅元数据，不计算行数，速度快）
+ * @param repoRoot 仓库根目录
+ * @param fileUri 文件Uri
+ * @returns 提交记录列表（新→旧）
+ */
+async function getFileCommitList(repoRoot: string, fileUri: vscode.Uri): Promise<GitCommitStat[]> {
+  const relativePath = getRepoRelativePath(repoRoot, fileUri);
+  const logOut = await runGitCmd(repoRoot, `git log --format=%H%x1e%an%x1e%ad%x1e%s --date=iso-strict -- "${relativePath}"`);
+  const result: GitCommitStat[] = [];
+  if (logOut) {
+    for (const line of logOut.split('\n').filter(Boolean)) {
+      const parts = line.split('\x1e');
+      const hash = parts[0];
+      const dateTs = new Date(parts[2]).getTime();
+      result.push({
+        hash,
+        shortHash: hash.substring(0, 7),
+        author: parts[1] || '',
+        dateLabel: formatCommitDate(dateTs),
+        dateTs,
+        subject: parts.slice(3).join('\x1e'),
+        stats: { fileCount: 0, totalLines: 0, codeLines: 0, commentLines: 0, blankLines: 0 },
+        isWorkingTree: false
+      });
+    }
+  }
+  return result;
+}
+
+/**
+ * 获取某提交涉及的所有文件路径
+ * @param repoRoot 仓库根目录
+ * @param hash 提交hash
+ * @returns 文件路径列表
+ */
+async function getFilesInCommit(repoRoot: string, hash: string): Promise<string[]> {
+  const out = await runGitCmd(repoRoot, `git show --name-only --format= ${hash}`);
+  return out.split('\n').filter(Boolean);
 }
 
 /**
@@ -234,69 +368,243 @@ function buildCsv(history: HistoryItem[]): string {
   return header + rows.join("\n");
 }
 
-function buildWebviewHtml(list: HistoryItem[]): string {
-  const dataJson = JSON.stringify(list);
+function buildWebviewHtml(data: { filePath: string; commits: GitCommitStat[] }): string {
+  // 转义 < 防止路径/摘要包含 </script> 破坏页面
+  const dataJson = JSON.stringify(data).replace(/</g, '\\u003c');
   return `
 <!DOCTYPE html>
-<html lang="zh‑CN">
+<html lang="zh-CN">
 <head>
-<meta charset="UTF‑8">
-<meta name="viewport" content="width=device‑width,initial‑scale=1.0">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>代码量统计图表</title>
-<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
 <style>
-body {background:#1e1e1e;color:#ccc;padding:12px;font‑family:system‑ui}
+body {background:#1e1e1e;color:#ccc;padding:12px;font-family:system-ui}
+h2,h3 {margin:8px 0}
+.file-path {color:#888;font-size:11px;margin-bottom:4px;word-break:break-all}
 #chart {width:100%;height:500px}
-pre {font‑size:11px;overflow‑x:auto;background:#2d2d2d;padding:8px}
-table {border-collapse: collapse;width:100%;margin:10px 0}
-th,td {border:1px solid #444;padding:6px 8px;text-align:left}
-th {background:#333}
+.chart-msg {color:#f0a020;padding:16px;border:1px dashed #666;display:none;margin:8px 0}
+table {border-collapse:collapse;width:100%;margin:10px 0;font-size:12px}
+th,td {border:1px solid #444;padding:6px 8px;text-align:left;white-space:nowrap}
+th {background:#333;position:sticky;top:0}
+tbody tr {cursor:pointer}
+tbody tr:hover {background:#2a2d2e}
+tbody tr.active {background:#37373d;outline:1px solid #0e639c}
+tbody tr.worktree td:first-child {color:#4fc1ff}
+.hint {color:#888;font-size:11px;margin-left:6px}
+.subj-cell {max-width:360px;overflow:hidden;text-overflow:ellipsis}
 </style>
 </head>
 <body>
 <h2>📈 代码量变更趋势图表</h2>
+<div class="file-path" id="filePathLabel"></div>
 <div id="chart"></div>
-<h3>历史快照列表</h3>
-<pre id="list"></pre>
+<div id="chartMsg" class="chart-msg">⚠️ 图表库（ECharts）加载失败，请检查网络后重新打开。提交记录列表不受影响，可正常查看。</div>
+<h3>Git提交记录 <span class="hint">点击某条记录，上方图表画出标记线并高亮该提交</span></h3>
+<div class="hint" id="selInfo"></div>
+<table>
+<thead><tr><th>提交</th><th>作者</th><th>时间</th><th>摘要</th><th>总行数</th><th>代码行</th><th>注释行</th><th>空行</th></tr></thead>
+<tbody id="listBody"></tbody>
+</table>
 <script>
-const raw = ${dataJson};
-const chartDom = document.getElementById('chart');
-const myChart = echarts.init(chartDom, 'dark');
+const data = ${dataJson};
+const listBody = document.getElementById('listBody');
+const chartEl = document.getElementById('chart');
+const chartMsg = document.getElementById('chartMsg');
+const filePathLabel = document.getElementById('filePathLabel');
+const selInfo = document.getElementById('selInfo');
+let myChart = null;
+let activeIdx = -1;
 
-const xAxisData = raw.map(i=>i.humanTime);
-const series = [
-  {name:'文件数',type:'line',data:raw.map(i=>i.fileCount)},
-  {name:'总行数',type:'line',data:raw.map(i=>i.totalLines)},
-  {name:'有效代码行',type:'line',data:raw.map(i=>i.codeLines)},
-  {name:'注释行',type:'line',data:raw.map(i=>i.commentLines)},
-  {name:'空行',type:'line',data:raw.map(i=>i.blankLines)}
+filePathLabel.textContent = data.filePath;
+if (data.commits.length > 0) {
+  activeIdx = data.commits.length - 1; // 默认高亮最新一条（含"工作区"）
+}
+
+// ---------- 渲染提交记录列表（不依赖图表库，始终可用） ----------
+function renderList() {
+  if (data.commits.length === 0) {
+    listBody.innerHTML = '<tr><td colspan="8" style="color:#888">该文件暂无git提交记录（可能是未跟踪的新文件）。</td></tr>';
+    selInfo.textContent = '';
+    return;
+  }
+  listBody.innerHTML = data.commits.map((c, idx) => \`
+    <tr data-idx="\${idx}" class="\${idx === activeIdx ? 'active' : ''}\${c.isWorkingTree ? ' worktree' : ''}">
+      <td title="\${c.hash}">\${c.shortHash}</td>
+      <td>\${c.author}</td>
+      <td>\${c.dateLabel}</td>
+      <td class="subj-cell" title="\${c.subject}">\${c.subject}</td>
+      <td>\${c.stats.totalLines}</td>
+      <td>\${c.stats.codeLines}</td>
+      <td>\${c.stats.commentLines}</td>
+      <td>\${c.stats.blankLines}</td>
+    </tr>\`).join('');
+  listBody.querySelectorAll('tr').forEach(tr => {
+    tr.addEventListener('click', () => {
+      activeIdx = Number(tr.dataset.idx);
+      renderList();
+      renderChart();
+    });
+  });
+}
+
+// ---------- 渲染趋势图（仅在ECharts可用时生效） ----------
+function renderChart() {
+  if (!myChart) return;
+  if (data.commits.length === 0) { myChart.clear(); selInfo.textContent = ''; return; }
+  const commits = data.commits;
+  const idx = Math.max(0, activeIdx);
+  const series = [
+    {name:'总行数', type:'line', data:commits.map(c=>c.stats.totalLines)},
+    {name:'有效代码行', type:'line', data:commits.map(c=>c.stats.codeLines)},
+    {name:'注释行', type:'line', data:commits.map(c=>c.stats.commentLines)},
+    {name:'空行', type:'line', data:commits.map(c=>c.stats.blankLines)}
+  ];
+  // 在选中的提交处画标记线（只在"总行数"系列上画一次，避免重复）
+  const markLine = {
+    symbol:'none',
+    silent:true,
+    label:{ color:'#4fc1ff', formatter: commits[idx].shortHash + ' ' + commits[idx].dateLabel },
+    lineStyle:{ color:'#4fc1ff', width:2 },
+    data:[{ xAxis: idx }]
+  };
+  const option = {
+    tooltip:{ trigger:'axis' },
+    legend:{ data:['总行数','有效代码行','注释行','空行'] },
+    grid:{ left:70, right:40, top:40, bottom:60 },
+    xAxis:{ type:'category', data:commits.map(c=>c.shortHash), axisLabel:{ rotate:45 } },
+    yAxis:{ type:'value' },
+    series: series.map((s, si) => si === 0 ? {...s, markLine} : s)
+  };
+  myChart.setOption(option, true);
+  selInfo.textContent = \`已选中 \${commits[idx].shortHash}（\${commits[idx].dateLabel}），共 \${commits.length} 条\`;
+}
+
+renderList();
+renderChart(); // myChart未初始化时为no-op
+
+// ---------- ECharts加载（多CDN备用，全部失败则提示，不影响列表） ----------
+function initChart() {
+  myChart = echarts.init(chartEl, 'dark');
+  window.addEventListener('resize', () => myChart.resize());
+  renderChart();
+}
+const sources = [
+  'https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js',
+  'https://unpkg.com/echarts@5.4.3/dist/echarts.min.js',
+  'https://cdn.bootcdn.net/ajax/libs/echarts/5.4.3/echarts.min.js'
 ];
-
-const option = {
-  tooltip:{trigger:'axis'},
-  legend:{data:series.map(s=>s.name)},
-  xAxis:{type:'category',data:xAxisData,axisLabel:{rotate:30}},
-  yAxis:{type:'value'},
-  series
-};
-myChart.setOption(option);
-window.addEventListener('resize',()=>myChart.resize());
-
-const preDom = document.getElementById('list');
-preDom.innerText = raw.map((item,idx)=>
-\`[\${idx+1}] \${item.humanTime} | \${item.targetPath}
-文件:\${item.fileCount} 总行:\${item.totalLines} 代码:\${item.codeLines} 注释:\${item.commentLines} 空行:\${item.blankLines}\`
-).join('\\n\\n');
+function tryLoad(i) {
+  if (i >= sources.length) { chartMsg.style.display = 'block'; return; }
+  const s = document.createElement('script');
+  s.src = sources[i];
+  s.onload = () => initChart();
+  s.onerror = () => tryLoad(i + 1);
+  document.head.appendChild(s);
+}
+tryLoad(0);
 </script>
 </body>
 </html>
 `;
 }
 
+// 构建"文件提交历史"Webview页面：左侧提交列表，点击后在右侧显示该提交涉及的文件
+function buildCommitHistoryHtml(data: { filePath: string; commits: GitCommitStat[] }): string {
+  // 转义 < 防止路径/摘要包含 </script> 破坏页面
+  const dataJson = JSON.stringify(data).replace(/</g, '\\u003c');
+  return `
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>文件提交历史</title>
+<style>
+* {box-sizing:border-box}
+body {margin:0;background:#1e1e1e;color:#ccc;font-family:system-ui;display:flex;flex-direction:column;height:100vh}
+.header {padding:10px 14px;border-bottom:1px solid #333;font-size:13px;display:flex;align-items:center;gap:10px}
+.header .path {color:#888;word-break:break-all;flex:1}
+.header .count {color:#4fc1ff;white-space:nowrap}
+.main {flex:1;display:flex;min-height:0}
+.left {width:42%;border-right:1px solid #333;overflow-y:auto}
+.right {flex:1;overflow-y:auto;padding:10px 14px}
+.commit-item {padding:8px 12px;border-bottom:1px solid #2a2a2a;cursor:pointer}
+.commit-item:hover {background:#2a2d2e}
+.commit-item.active {background:#37373d;outline:1px solid #0e639c}
+.commit-item .top {display:flex;justify-content:space-between;gap:8px}
+.commit-item .hash {color:#4fc1ff;font-family:Consolas,monospace;font-size:12px}
+.commit-item .date {color:#888;font-size:11px;white-space:nowrap}
+.commit-item .subject {margin-top:2px;font-size:13px;color:#ddd;word-break:break-all}
+.commit-item .author {color:#9aa0a6;font-size:11px;margin-top:2px}
+.placeholder {color:#888;text-align:center;margin-top:40px}
+.file-item {padding:6px 10px;border-bottom:1px solid #2a2a2a;font-family:Consolas,monospace;font-size:12px;word-break:break-all}
+.file-item:hover {background:#2a2d2e}
+.section-title {color:#4fc1ff;margin:12px 0 6px;font-size:12px}
+</style>
+</head>
+<body>
+<div class="header">
+  <span>📜 文件提交历史</span>
+  <span class="path" id="filePathLabel"></span>
+  <span class="count" id="countLabel"></span>
+</div>
+<div class="main">
+  <div class="left" id="commitList"></div>
+  <div class="right" id="fileList"><div class="placeholder">点击左侧提交记录，查看该提交涉及的所有文件</div></div>
+</div>
+<script>
+const data = ${dataJson};
+const vscode = acquireVsCodeApi();
+const commitList = document.getElementById('commitList');
+const fileList = document.getElementById('fileList');
+const countLabel = document.getElementById('countLabel');
+document.getElementById('filePathLabel').textContent = data.filePath;
+countLabel.textContent = data.commits.length > 0 ? \`共 \${data.commits.length} 条提交\` : '';
+let activeHash = '';
+function renderCommits() {
+  if (data.commits.length === 0) {
+    commitList.innerHTML = '<div class="placeholder">该文件暂无git提交记录</div>';
+    return;
+  }
+  commitList.innerHTML = data.commits.map(c => \`
+    <div class="commit-item" data-hash="\${c.hash}">
+      <div class="top"><span class="hash">\${c.shortHash}</span><span class="date">\${c.dateLabel}</span></div>
+      <div class="subject">\${c.subject}</div>
+      <div class="author">\${c.author}</div>
+    </div>\`).join('');
+  commitList.querySelectorAll('.commit-item').forEach(el => {
+    el.addEventListener('click', () => {
+      commitList.querySelectorAll('.commit-item').forEach(x => x.classList.remove('active'));
+      el.classList.add('active');
+      activeHash = el.dataset.hash;
+      fileList.innerHTML = '<div class="placeholder">加载中…</div>';
+      vscode.postMessage({ type: 'getFiles', hash: activeHash });
+    });
+  });
+}
+window.addEventListener('message', (event) => {
+  const msg = event.data;
+  if (msg.type === 'files' && msg.hash === activeHash) {
+    if (!msg.files || msg.files.length === 0) {
+      fileList.innerHTML = '<div class="placeholder">该提交未涉及文件变更</div>';
+      return;
+    }
+    fileList.innerHTML = '<div class="section-title">涉及文件（' + msg.files.length + '）</div>' + msg.files.map(f => '<div class="file-item">' + f + '</div>').join('');
+  }
+});
+renderCommits();
+</script>
+</body>
+</html>
+`;
+}
+
+
 // 执行git命令包装（保留原有，给blame继续使用）
 function execGit(cwd:string, cmd:string):Promise<string>{
   return new Promise((resolve,reject)=>{
-    exec(cmd,{cwd},(err,stdout,stderr)=>{
+    exec(cmd,{cwd, maxBuffer: 100 * 1024 * 1024},(err,stdout,stderr)=>{
       if(err) return reject(err);
       resolve(stdout);
     })
@@ -309,7 +617,7 @@ async function getFileBlame(filePath:string):Promise<GitLineCommitInfo[]>{
   try{
     const relFile = path.relative(dir,filePath);
     const out = await execGit(dir,`git blame --porcelain "${relFile}"`);
-    const lines = out.split('\n');
+    const lines = out.replace(/\r/g,'').split('\n');
     const result:GitLineCommitInfo[]=[];
     let lineNum = 0;
     let hash = '';
@@ -332,6 +640,8 @@ async function getFileBlame(filePath:string):Promise<GitLineCommitInfo[]>{
       }
       if(l.startsWith('\t')){
         // 代码行输出，组装一条记录
+        // 注意：不要清空 hash/author/subject —— porcelain 格式中同一提交的多行
+        // 只输出一次元数据，后续行需沿用上一次的 author/subject
         result.push({
           lineNumber: lineNum,
           shortHash: hash.substring(0,7),
@@ -339,7 +649,6 @@ async function getFileBlame(filePath:string):Promise<GitLineCommitInfo[]>{
           author,
           subject
         })
-        hash='';author='';subject='';
       }
     }
     return result;
@@ -351,15 +660,98 @@ async function getFileBlame(filePath:string):Promise<GitLineCommitInfo[]>{
 export function activate(context: vscode.ExtensionContext) {
   const GLOBAL_KEY = "codeCounterStore";
 
-  // 行尾装饰器，浅色提示
-  const gitDecorationType = vscode.window.createTextEditorDecorationType({
+  // ===== Git blame 光标行提示（行尾装饰，GitLens风格）=====
+  // 光标所在行的代码末尾显示「短hash 作者 · 摘要」，光标移走即消失；悬停该行可查看详情并点击打开差异
+  const blameLineDecoration = vscode.window.createTextEditorDecorationType({
     after: {
-      color: new vscode.ThemeColor('editorLineNumber.foreground'),
-      textDecoration: 'none; opacity: 0.45; margin: 0 8px;'
+      margin: '0 0 0 1.5em',
+      color: new vscode.ThemeColor('editorGhostText.foreground')
     }
   });
 
-  let activeEditor: vscode.TextEditor | undefined;
+  // blame结果缓存，按文件修改时间判断是否需要重新执行git blame
+  let blameCache: { fsPath: string; mtimeMs: number; list: GitLineCommitInfo[] } | null = null;
+  // 同一文件并发blame请求去重（避免光标快速移动时重复执行git命令）
+  let blameInFlight: { fsPath: string; promise: Promise<GitLineCommitInfo[]> } | null = null;
+
+  async function getBlameList(fsPath: string): Promise<GitLineCommitInfo[]> {
+    if (blameInFlight && blameInFlight.fsPath === fsPath) return blameInFlight.promise;
+    const promise = (async () => {
+      try {
+        const stat = await fs.promises.stat(fsPath);
+        if (blameCache && blameCache.fsPath === fsPath && blameCache.mtimeMs === stat.mtimeMs) {
+          return blameCache.list;
+        }
+        const list = await getFileBlame(fsPath);
+        blameCache = { fsPath, mtimeMs: stat.mtimeMs, list };
+        return list;
+      } catch {
+        if (blameCache && blameCache.fsPath === fsPath) blameCache = null;
+        return [];
+      } finally {
+        if (blameInFlight && blameInFlight.fsPath === fsPath) blameInFlight = null;
+      }
+    })();
+    blameInFlight = { fsPath, promise };
+    return promise;
+  }
+
+  // 记录当前装饰了哪个编辑器，切换时清空旧装饰
+  let blameDecoratedEditor: vscode.TextEditor | null = null;
+
+  // 在光标所在行末尾绘制blame装饰。list为null表示blame尚未加载完成（先不画）
+  function applyBlameDecoration(editor: vscode.TextEditor, fsPath: string, lineNum: number, list: GitLineCommitInfo[] | null) {
+    // 光标已离开该文件或该行时不更新
+    if (vscode.window.activeTextEditor !== editor) return;
+    if (editor.selection.active.line + 1 !== lineNum) return;
+    const line = editor.document.lineAt(lineNum - 1);
+    const item = list ? list.find(i => i.lineNumber === lineNum) : undefined;
+    if (!item) {
+      // blame无数据（文件未跟踪/不在仓库/无提交），行尾给个可见提示
+      editor.setDecorations(blameLineDecoration, [{
+        range: line.range,
+        renderOptions: { after: { contentText: '（该行无Git提交信息）' } }
+      }]);
+      return;
+    }
+    const subject = item.subject.length > 30 ? item.subject.substring(0, 30) + '…' : item.subject;
+    const content = ` ${item.shortHash} ${item.author} · ${subject}`;
+    const args = encodeURIComponent(JSON.stringify([{ file: fsPath, hash: item.fullHash }]));
+    const historyArgs = encodeURIComponent(JSON.stringify([{ file: fsPath }]));
+    const hover = new vscode.MarkdownString();
+    hover.appendMarkdown(`**提交** \`${item.fullHash}\`  \n\n**作者** ${item.author}  \n**摘要** ${item.subject}  \n\n[🔀](command:code-counter.openFileGitDiff?${args} "查看提交差异")  [📜](command:code-counter.openFileCommitHistory?${historyArgs} "查看文件提交历史")`);
+    hover.isTrusted = true;
+    editor.setDecorations(blameLineDecoration, [{
+      range: line.range,
+      hoverMessage: hover,
+      renderOptions: { after: { contentText: content } }
+    }]);
+  }
+
+  // 根据当前光标刷新行尾装饰；缓存缺失时自动后台执行blame
+  function updateBlameDecoration(editor: vscode.TextEditor | undefined) {
+    // 切换编辑器时先清空旧编辑器的装饰
+    if (blameDecoratedEditor && blameDecoratedEditor !== editor) {
+      blameDecoratedEditor.setDecorations(blameLineDecoration, []);
+      blameDecoratedEditor = null;
+    }
+    if (!editor || editor.document.isUntitled || editor.document.uri.scheme !== 'file') {
+      return;
+    }
+    blameDecoratedEditor = editor;
+    const fsPath = editor.document.uri.fsPath;
+    const lineNum = editor.selection.active.line + 1; // blame行号从1开始
+    const cached = (blameCache && blameCache.fsPath === fsPath) ? blameCache.list : null;
+    applyBlameDecoration(editor, fsPath, lineNum, cached);
+    if (!cached) {
+      // 无缓存：后台加载blame，完成后按当时的活动编辑器/光标刷新
+      getBlameList(fsPath).then(list => {
+        if (vscode.window.activeTextEditor === editor) {
+          applyBlameDecoration(editor, fsPath, lineNum, list);
+        }
+      });
+    }
+  }
 
   function loadStore(): ExtensionGlobalState {
     const raw = context.globalState.get<ExtensionGlobalState>(GLOBAL_KEY);
@@ -371,49 +763,27 @@ export function activate(context: vscode.ExtensionContext) {
     context.globalState.update(GLOBAL_KEY, state);
   }
 
-  // 更新编辑器git blame行提示
-  async function updateGitBlameDecorations(editor:vscode.TextEditor){
-    if(!editor.document.isUntitled && editor.document.uri.scheme === 'file'){
-      const fsPath = editor.document.uri.fsPath;
-      const blameList = await getFileBlame(fsPath);
-      const decorations:vscode.DecorationOptions[]=[];
-      for(const item of blameList){
-        const ln = item.lineNumber -1;
-        if(ln <0 || ln >= editor.document.lineCount) continue;
-        const line = editor.document.lineAt(ln);
-        const pos = new vscode.Position(ln, line.text.length);
-        const hoverMsg = new vscode.MarkdownString();
-        const args = JSON.stringify({file:fsPath,hash:item.fullHash});
-        hoverMsg.appendMarkdown(`**Commit ${item.shortHash}**\n\n作者：${item.author}\n\n摘要：${item.subject}\n\n[点击查看提交差异](command:code-counter.openFileGitDiff?${encodeURIComponent(args)})`);
-        hoverMsg.isTrusted = true;
-        decorations.push({
-          range: new vscode.Range(pos,pos),
-          hoverMessage: hoverMsg,
-          renderOptions:{
-            after:{
-              contentText:`  ${item.shortHash} ${item.subject.substring(0,22)}${item.subject.length>22?'…':''}`
-            }
-          }
-        })
-      }
-      editor.setDecorations(gitDecorationType,decorations);
-    }
-  }
+  // 切换编辑器：刷新行尾装饰（内部会自动加载blame）
+  vscode.window.onDidChangeActiveTextEditor((editor) => {
+    updateBlameDecoration(editor);
+  }, null, context.subscriptions);
 
-  // 切换编辑器触发刷新
-  vscode.window.onDidChangeActiveTextEditor(async (editor)=>{
-    activeEditor = editor;
-    if(editor){
-      await updateGitBlameDecorations(editor);
-    }
-  },null,context.subscriptions);
+  // 光标移动：实时刷新行尾装饰（缓存命中即显示，未命中则后台加载）
+  vscode.window.onDidChangeTextEditorSelection((e) => {
+    updateBlameDecoration(e.textEditor);
+  }, null, context.subscriptions);
 
-  // 文档保存后刷新blame
-  vscode.workspace.onDidSaveTextDocument(async (doc)=>{
-    if(activeEditor && activeEditor.document.uri.toString() === doc.uri.toString()){
-      await updateGitBlameDecorations(activeEditor);
+  // 文档保存后：重新blame并刷新行尾装饰
+  vscode.workspace.onDidSaveTextDocument((doc) => {
+    if (doc.uri.scheme === 'file') {
+      getBlameList(doc.uri.fsPath).then(() => {
+        const editor = vscode.window.activeTextEditor;
+        if (editor && editor.document.uri.toString() === doc.uri.toString()) {
+          updateBlameDecoration(editor);
+        }
+      });
     }
-  },null,context.subscriptions);
+  }, null, context.subscriptions);
 
   // ====================== 重构：打开git diff差异窗口命令（稳定版，使用自定义scheme） ======================
   // 注册自定义文本内容提供器，使vscode.diff能读取提交历史版本文件
@@ -463,6 +833,50 @@ export function activate(context: vscode.ExtensionContext) {
       console.error("[openFileGitDiff ERROR]", err);
       vscode.window.showErrorMessage(`打开Git差异失败：${err.message}`);
     }
+  });
+
+  // 打开"文件提交历史"窗口：左侧所有提交，点击后在右侧显示该提交涉及的文件
+  const openHistoryCmd = vscode.commands.registerCommand('code-counter.openFileCommitHistory', async (args?: { file?: string }) => {
+    let fileUri: vscode.Uri | undefined;
+    if (args && args.file) {
+      fileUri = vscode.Uri.file(args.file);
+    } else {
+      const editor = vscode.window.activeTextEditor;
+      if (editor && !editor.document.isUntitled && editor.document.uri.scheme === 'file') {
+        fileUri = editor.document.uri;
+      }
+    }
+    if (!fileUri) {
+      vscode.window.showWarningMessage('请先打开一个文件，再查看其提交历史。');
+      return;
+    }
+    const repoRoot = await getGitRepoRoot(fileUri);
+    if (!repoRoot) {
+      vscode.window.showErrorMessage(`文件不在Git仓库中，无法获取提交历史：${fileUri.fsPath}`);
+      return;
+    }
+    const commits = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: '正在读取提交历史...' },
+      () => getFileCommitList(repoRoot, fileUri)
+    );
+    const panel = vscode.window.createWebviewPanel(
+      'codeCounterCommitHistory',
+      `提交历史 - ${path.basename(fileUri.fsPath)}`,
+      vscode.ViewColumn.One,
+      { enableScripts: true }
+    );
+    panel.webview.html = buildCommitHistoryHtml({ filePath: fileUri.fsPath, commits });
+    panel.webview.onDidReceiveMessage(async (msg) => {
+      if (msg.type === 'getFiles' && msg.hash) {
+        let files: string[] = [];
+        try {
+          files = await getFilesInCommit(repoRoot, msg.hash);
+        } catch {
+          files = [];
+        }
+        await panel.webview.postMessage({ type: 'files', hash: msg.hash, files });
+      }
+    }, null, context.subscriptions);
   });
 
   const countCmd = vscode.commands.registerCommand('code-counter.countCode', async (uri: vscode.Uri) => {
@@ -540,22 +954,6 @@ export function activate(context: vscode.ExtensionContext) {
     output.appendLine(`\n✅已保存本次统计快照到变更历史`);
   });
 
-  const showHistoryCmd = vscode.commands.registerCommand('code-counter.showHistory', () => {
-    const store = loadStore();
-    const output = vscode.window.createOutputChannel('CodeCounter‑History');
-    output.show(true);
-    output.appendLine("# 📜 代码统计历史快照表格");
-    output.appendLine("| 序号 | 统计时间 | 路径 | 文件数 | 总行数 | 有效代码行 | 注释行 | 空行 |");
-    output.appendLine("|------|----------|------|--------|--------|------------|--------|------|");
-    if (store.historyList.length === 0) {
-      output.appendLine("暂无历史快照，请先执行一次代码统计");
-      return;
-    }
-    store.historyList.forEach((item, idx) => {
-      output.appendLine(`| ${idx+1} | ${item.humanTime} | ${item.targetPath} | ${item.fileCount} | ${item.totalLines} | ${item.codeLines} | ${item.commentLines} | ${item.blankLines} |`);
-    });
-  });
-
   const clearHistoryCmd = vscode.commands.registerCommand('code-counter.clearHistory', async () => {
     const confirm = await vscode.window.showWarningMessage("确定要清空全部代码统计历史快照？不可恢复", "确定清空", "取消");
     if (confirm !== "确定清空") return;
@@ -580,14 +978,35 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.window.showInformationMessage(`✅CSV已导出: ${uri.fsPath}`);
   });
 
-  const openChartCmd = vscode.commands.registerCommand('code-counter.openChart', () => {
-    const store = loadStore();
-    const panel = vscode.window.createWebviewPanel('codeCounterChart', '代码量统计图表', vscode.ViewColumn.One, { enableScripts: true });
-    panel.webview.html = buildWebviewHtml(store.historyList);
+  const openChartCmd = vscode.commands.registerCommand('code-counter.openChart', async () => {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document.isUntitled || editor.document.uri.scheme !== 'file') {
+      vscode.window.showWarningMessage('请先在编辑器中打开一个文件，再执行“CodeCounter: 打开统计图表”。');
+      return;
+    }
+    const fileUri = editor.document.uri;
+    const repoRoot = await getGitRepoRoot(fileUri);
+    if (!repoRoot) {
+      vscode.window.showErrorMessage(`文件不在Git仓库中，无法获取提交记录：${fileUri.fsPath}`);
+      return;
+    }
+
+    const commits = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: '正在读取Git提交记录并统计行数...' },
+      () => getFileCommitStats(repoRoot, fileUri)
+    );
+
+    const panel = vscode.window.createWebviewPanel(
+      'codeCounterChart',
+      `代码量统计图表 - ${path.basename(fileUri.fsPath)}`,
+      vscode.ViewColumn.One,
+      { enableScripts: true }
+    );
+    panel.webview.html = buildWebviewHtml({ filePath: fileUri.fsPath, commits });
   });
 
   context.subscriptions.push(
-    countCmd, showHistoryCmd, clearHistoryCmd, exportCsvCmd, openChartCmd, openDiffCmd, gitDecorationType
+    countCmd, clearHistoryCmd, exportCsvCmd, openChartCmd, openDiffCmd, openHistoryCmd, blameLineDecoration
   );
 }
 

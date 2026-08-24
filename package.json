@@ -11,10 +11,10 @@
   ],
   "activationEvents": [
     "onCommand:code-counter.countCode",
-    "onCommand:code-counter.showHistory",
     "onCommand:code-counter.clearHistory",
     "onCommand:code-counter.exportCsv",
     "onCommand:code-counter.openChart",
+    "onCommand:code-counter.openFileCommitHistory",
     "onCommand:code-counter.openFileGitDiff"
   ],
   "main": "./out/extension.js",
@@ -29,10 +29,6 @@
       ],
       "commandPalette": [
         {
-          "command": "code-counter.showHistory",
-          "title": "CodeCounter: 查看代码统计变更历史"
-        },
-        {
           "command": "code-counter.clearHistory",
           "title": "CodeCounter: 清空统计历史记录"
         },
@@ -43,6 +39,10 @@
         {
           "command": "code-counter.openChart",
           "title": "CodeCounter: 打开统计可视化图表"
+        },
+        {
+          "command": "code-counter.openFileCommitHistory",
+          "title": "CodeCounter: 查看文件提交历史"
         }
       ]
     },
@@ -50,10 +50,6 @@
       {
         "command": "code-counter.countCode",
         "title": "统计代码行数"
-      },
-      {
-        "command": "code-counter.showHistory",
-        "title": "查看代码统计变更历史"
       },
       {
         "command": "code-counter.clearHistory",
@@ -66,6 +62,10 @@
       {
         "command": "code-counter.openChart",
         "title": "打开统计可视化图表"
+      },
+      {
+        "command": "code-counter.openFileCommitHistory",
+        "title": "查看文件提交历史"
       },
       {
         "command": "code-counter.openFileGitDiff",
