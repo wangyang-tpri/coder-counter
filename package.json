@@ -1,8 +1,13 @@
 {
   "name": "code-counter",
+  "publisher": "wang-yang",
   "displayName": "Code Counter",
   "description": "统计选中文件/文件夹代码行数，变更历史、图表可视化，编辑器行尾Git变更提示",
-  "version": "0.0.4",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wangyang-tpri/coder-counter.git"
+  },
+  "version": "0.0.1",
   "engines": {
     "vscode": "^1.80.0"
   },
@@ -42,24 +47,12 @@
         "title": "统计代码行数"
       },
       {
-        "command": "code-counter.clearHistory",
-        "title": "清空统计历史记录"
-      },
-      {
-        "command": "code-counter.exportCsv",
-        "title": "导出历史为CSV文件"
-      },
-      {
         "command": "code-counter.openChart",
         "title": "打开统计可视化图表"
       },
       {
         "command": "code-counter.openFileCommitHistory",
         "title": "查看文件提交历史"
-      },
-      {
-        "command": "code-counter.openFileGitDiff",
-        "title": "打开文件Git提交差异（内部）"
       }
     ]
   },
