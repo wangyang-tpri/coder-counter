@@ -9,7 +9,9 @@
   },
   "version": "0.1.1",
   "engines": {
-    "vscode": "^1.80.0"
+    "vscode": "^1.80.0",
+    "node": ">20.0.0",
+    "npm": ">=10.0.0"
   },
   "categories": [
     "Other"
