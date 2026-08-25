@@ -17,6 +17,7 @@
   "activationEvents": [
     "onStartupFinished",
     "onCommand:code-counter.countCode",
+    "onCommand:code-counter.exportWord",
     "onCommand:code-counter.openChart",
     "onCommand:code-counter.openFileCommitHistory"
   ],
@@ -26,6 +27,11 @@
       "explorer/context": [
         {
           "command": "code-counter.countCode",
+          "group": "navigation",
+          "when": "resourceScheme == file"
+        },
+        {
+          "command": "code-counter.exportWord",
           "group": "navigation",
           "when": "resourceScheme == file"
         }
@@ -45,6 +51,10 @@
       {
         "command": "code-counter.countCode",
         "title": "统计代码行数"
+      },
+      {
+        "command": "code-counter.exportWord",
+        "title": "导出代码为Word文档"
       },
       {
         "command": "code-counter.openChart",
