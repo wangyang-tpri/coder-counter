@@ -2,12 +2,12 @@
   "name": "coder-counter",
   "publisher": "wang-yang",
   "displayName": "Coder Counter",
-  "description": "统计选中文件/文件夹代码行数，变更历史、图表可视化，编辑器行尾Git变更提示",
+  "description": "统计选中文件/文件夹代码行数，变更历史、图表可视化，编辑器行尾Git变更提示，将选中文件夹中的所有代码导出为Word文档",
   "repository": {
     "type": "git",
     "url": "https://github.com/wangyang-tpri/coder-counter.git"
   },
-  "version": "0.0.1",
+  "version": "0.0.2",
   "engines": {
     "vscode": "^1.80.0"
   },
